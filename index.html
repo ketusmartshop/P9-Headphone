@@ -587,7 +587,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
             </div>
             <div class="delivery-note">
               <b>গাজীপুরের ভেতরে ডেলিভারি চার্জ:</b> ৪০ টাকা<br>
-              <b>গাজীপুরের বাইরে ডেলিভারি চার্জ:</b> ৭০ টাকা
+              <b>ঢাকার বাইরে ডেলিভারি চার্জ:</b> ৭০ টাকা
             </div>
             <div class="field bkash-field" id="bkashField">
               <label>যে নাম্বার থেকে বিকাশ করেছেন</label>
@@ -683,7 +683,10 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 <div class="admin-overlay" id="adminDashboard">
   <div class="admin-top">
     <div class="admin-title">Ketu's Mart — অ্যাডমিন প্যানেল</div>
-    <button class="admin-logout" id="adminLogoutBtn">লগআউট</button>
+    <div style="display:flex;gap:8px;">
+      <button class="admin-logout" id="adminRefreshBtn">🔄 রিফ্রেশ</button>
+      <button class="admin-logout" id="adminLogoutBtn">লগআউট</button>
+    </div>
   </div>
   <div class="admin-body">
     <div class="tabs">
@@ -730,8 +733,67 @@ const IMG_LINKS = [
 ];
 /* ===== IMAGE LINKS শেষ ===== */
 
+/* ===== ব্যাকএন্ড (SheetDB.io) কনফিগারেশন =====
+   GitHub Pages-এ স্ট্যাটিক সাইটের নিজের কোনো ডেটাবেস থাকে না, তাই অর্ডার
+   সেভ/লোড করতে SheetDB.io ব্যবহার করা হচ্ছে — এটা একটা Google Sheet-কে
+   সরাসরি একটা API-তে রূপান্তর করে দেয়, কোনো কোড লেখা লাগে না।
+   sheetdb.io -এ ফ্রি অ্যাকাউন্ট খুলে নিজের Sheet কানেক্ট করে যে API URL
+   পাবেন (যেমনঃ https://sheetdb.io/api/v1/xxxxxxxxxxxx), সেটা নিচে বসান। */
+const SHEET_API_URL = "https://sheetdb.io/api/v1/8zm17laplipd8";
+const BACKEND_READY = SHEET_API_URL.startsWith('http');
+
 let currentVariant = 'black';
-const orders = []; // in-memory order store (demo only — use a real database/backend in production)
+let orders = []; // local cache of orders (loaded from / synced to the SheetDB backend)
+
+async function saveOrderToBackend(order){
+  if (!BACKEND_READY) return { ok:false, reason:'not-configured' };
+  try{
+    const res = await fetch(SHEET_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: {
+        id: order.id, product: order.product, name: order.name, mobile: order.mobile,
+        address: order.address, district: order.district, payment: order.payment,
+        bkash: order.bkash, color: order.color, date: order.date, time: order.time,
+        isNew: "TRUE"
+      }})
+    });
+    return { ok: res.ok };
+  }catch(err){
+    console.error('Order save failed:', err);
+    return { ok:false, reason:'network' };
+  }
+}
+
+async function markSeenOnBackend(id){
+  if (!BACKEND_READY) return;
+  try{
+    await fetch(SHEET_API_URL + '/id/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: { isNew: "FALSE" } })
+    });
+  }catch(err){
+    console.error('Mark seen failed:', err);
+  }
+}
+
+async function fetchOrdersFromBackend(){
+  if (!BACKEND_READY) return null;
+  try{
+    const res = await fetch(SHEET_API_URL, { method: 'GET' });
+    const data = await res.json();
+    return data.map(o => ({
+      id: o.id, product: o.product, name: o.name, mobile: o.mobile,
+      address: o.address, district: o.district, payment: o.payment,
+      bkash: o.bkash, color: o.color, date: o.date, time: o.time,
+      isNew: String(o.isNew).toUpperCase() === 'TRUE'
+    }));
+  }catch(err){
+    console.error('Order fetch failed:', err);
+    return null;
+  }
+}
 
 /* ================= GALLERY (সবসময় ৪টি ছবিই দেখা যাবে) ================= */
 function renderThumbs(){
@@ -803,8 +865,9 @@ document.querySelectorAll('input[name="pay"]').forEach(radio => {
 });
 
 /* ================= ORDER FORM SUBMIT ================= */
-document.getElementById('orderForm').addEventListener('submit', function(e){
+document.getElementById('orderForm').addEventListener('submit', async function(e){
   e.preventDefault();
+  const submitBtn = this.querySelector('.form-submit');
   const payEl = document.querySelector('input[name="pay"]:checked');
   const order = {
     id: 'ORD' + Date.now(),
@@ -820,10 +883,23 @@ document.getElementById('orderForm').addEventListener('submit', function(e){
     time: new Date().toLocaleString('bn-BD'),
     isNew: true
   };
-  orders.push(order);
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'অপেক্ষা করুন...';
+  const result = await saveOrderToBackend(order);
+  submitBtn.disabled = false;
+  submitBtn.textContent = '✅ অর্ডার কনফার্ম করুন';
+
+  orders.push(order); // local fallback so it shows instantly if admin is open in this same tab
 
   const msg = document.getElementById('formMsg');
-  msg.textContent = '✅ ধন্যবাদ ' + (order.name || '') + '! আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে। আমরা শীঘ্রই আপনার সাথে যোগাযোগ করব।';
+  if (!BACKEND_READY){
+    msg.textContent = '⚠️ অর্ডারটি নেওয়া হয়েছে, কিন্তু ব্যাকএন্ড লিঙ্ক এখনো সেট করা হয়নি — তাই এটি এডমিন প্যানেলে অন্য ডিভাইস থেকে দেখা যাবে না। SHEET_API_URL সেট করতে হবে।';
+  } else if (result.ok){
+    msg.textContent = '✅ ধন্যবাদ ' + (order.name || '') + '! আপনার অর্ডারটি সফলভাবে গ্রহণ করা হয়েছে। আমরা শীঘ্রই আপনার সাথে যোগাযোগ করব।';
+  } else {
+    msg.textContent = '⚠️ অর্ডারটি সেভ করতে সমস্যা হয়েছে (ইন্টারনেট/সংযোগ চেক করুন)। আবার চেষ্টা করুন অথবা সরাসরি হোয়াটসঅ্যাপে যোগাযোগ করুন।';
+  }
   msg.classList.add('show','ok');
   this.reset();
   selectVariant('black');
@@ -985,14 +1061,34 @@ function checkPattern(){
 
 /* ================= ADMIN DASHBOARD ================= */
 const dashboard = document.getElementById('adminDashboard');
-function openDashboard(){
+async function openDashboard(){
   dashboard.classList.add('show');
-  renderAllTables();
+  await loadOrders();
 }
 document.getElementById('adminLogoutBtn').addEventListener('click', () => {
   adminAuthed = false;
   dashboard.classList.remove('show');
 });
+document.getElementById('adminRefreshBtn').addEventListener('click', loadOrders);
+
+async function loadOrders(){
+  if (!BACKEND_READY){
+    renderAllTables();
+    document.getElementById('table-total').innerHTML =
+      '<tr><td class="empty-state">⚠️ ব্যাকএন্ড (SheetDB) এখনো কানেক্ট করা হয়নি — কোডে SHEET_API_URL সেট করুন। ততক্ষণ শুধু এই সেশনে করা অর্ডারই (যদি থাকে) নিচে দেখা যাবে।</td></tr>' +
+      document.getElementById('table-total').innerHTML;
+    return;
+  }
+  document.getElementById('table-total').innerHTML = '<tr><td class="empty-state">লোড হচ্ছে...</td></tr>';
+  const fetched = await fetchOrdersFromBackend();
+  if (fetched !== null){
+    orders = fetched;
+  } else {
+    document.getElementById('table-total').innerHTML = '<tr><td class="empty-state">⚠️ ডেটা লোড করা যায়নি, ইন্টারনেট সংযোগ চেক করে রিফ্রেশ চাপুন।</td></tr>';
+    return;
+  }
+  renderAllTables();
+}
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -1032,6 +1128,7 @@ function markSeen(id){
   const o = orders.find(x => x.id === id);
   if (o) o.isNew = false;
   renderAllTables();
+  markSeenOnBackend(id);
 }
 
 function renderAllTables(){
