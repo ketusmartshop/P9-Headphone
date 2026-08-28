@@ -578,9 +578,63 @@ const TELEGRAM_BOT_TOKEN = "8933712344:AAGM2VqfmHsO1FdoXNYmCZSrvyFdS9lUPk";
 const TELEGRAM_CHAT_ID = "6278783743";
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
-let currentVariant = 'black';
-let telegramLastUpdateId = 0;
-let telegramPollingStarted = false;
+/*
+  GitHub Pages/static HTML থেকে Telegram API-তে application/json POST করলে
+  browser CORS preflight করতে পারে। তাই এখানে application/x-www-form-urlencoded
+  ব্যবহার করা হচ্ছে, যাতে অপ্রয়োজনীয় OPTIONS preflight এড়ানো যায়।
+*/
+async function telegramRequest(method, payload = {}){
+  const body = new URLSearchParams();
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value === undefined || value === null) return;
+    body.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const res = await fetch(`${TELEGRAM_API}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: body.toString(),
+      cache: 'no-store',
+      signal: controller.signal
+    });
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch {
+      throw new Error('Telegram API থেকে সঠিক response পাওয়া যায়নি।');
+    }
+
+    if (!res.ok || !data.ok) {
+      throw new Error(data.description || `Telegram API error (${res.status})`);
+    }
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Telegram API response পেতে বেশি সময় লাগছে।');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sendOrderToTelegram(order){
+  return telegramRequest('sendMessage', {
+    chat_id: TELEGRAM_CHAT_ID,
+    text: buildTelegramText(order),
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '✅ Confirm Order', callback_data: `confirm:${order.id}` },
+        { text: '❌ Cancel Order', callback_data: `cancel:${order.id}` }
+      ]]
+    }
+  });
+}
 
 /* ================= GALLERY ================= */
 function renderThumbs(){
@@ -771,7 +825,7 @@ document.getElementById('orderForm').addEventListener('submit',async function(e)
     bkashEl.required = false;
   }catch(err){
     console.error('Telegram order failed:',err);
-    msg.textContent = '⚠️ অর্ডার পাঠানো যায়নি। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
+    msg.textContent = '⚠️ অর্ডার পাঠানো যায়নি। ' + (err && err.message ? err.message : 'আবার চেষ্টা করুন।');
     msg.classList.add('show');
   }finally{
     submitBtn.disabled = false;
